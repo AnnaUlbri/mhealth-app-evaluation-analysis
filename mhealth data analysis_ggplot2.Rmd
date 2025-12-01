@@ -1,0 +1,572 @@
+---
+title: "Case Study mhealth Apps"
+author: "Anna Ulbricht"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+```
+
+# Introduction
+
+## Background
+
+This dataset contains evaluations of mHealth apps by two different reviewer groups:
+
+- **Non-Clinician Reviewers**: Evaluate apps based on usability (SUS score)
+- **Clinician Reviewers**: Evaluate apps based on clinical suitability (NPS)
+
+Each app was reviewed by both groups, allowing us to investigate:
+
+1. Whether patient/clinical involvement during development leads to better apps
+2. Whether both reviewer groups evaluate apps similarly (correlation)
+3. Whether the NPS/SUS is a valid instrument in this context
+
+## Variables
+
+- **SUS (System Usability Scale)**: 10 items, score 0-100, higher = better
+- **NPS (Net Promoter Score)**: 1 item, score 0-10, categorized into Promoters/Detractors
+
+# Setup
+```{r packages_and_data}
+# Load packages
+library(tidyverse)  # For data manipulation and visualization
+library(psych)      # For Cronbach's Alpha (reliability analysis)
+library(effectsize) # For Cohen's d (effect sizes)
+
+# Set working directory and load data
+setwd("/Users/anna/Documents/Portfolio Studies/diga_project")
+mhealth <- read.csv("mhealth.csv")
+
+# Dataset overview
+cat("Number of observations:", nrow(mhealth), "\n")
+cat("Number of variables:", ncol(mhealth), "\n")
+cat("\nStructure: Each app has 2 rows (1x Non-Clinician, 1x Clinician)\n")
+
+```
+# Data Preparation
+
+## Variable Selection
+
+We select only the variables relevant for our analyses:
+
+- **Identifiers**: App ID, Reviewer type
+- **Development process**: Patient Involvement, Clinical Expert Involvement
+- **SUS items**: 10 questions on usability (only for Non-Clinician Reviewers)
+- **NPS**: Recommendation likelihood (only for Clinician Reviewers)
+
+```{r select_variables}
+# Select relevant variables
+data_ux <- mhealth[, c(
+  # Identifiers
+  "AppID",
+  "Reviewer",
+  
+  # Development process (main research questions)
+  "Werepatientsinvolvedinappdevelopmentorqualitycontrol",
+  "Wasanappropriateclinicalexpertinvolvedinappdevelopmentorqualitycontrol",
+  
+  # SUS items (10 usability questions)
+  "IthinkthatIwouldliketousethisappfrequently",
+  "Ifoundtheappunnecessarilycomplex",
+  "Ithoughttheappwaseasytouse",
+  "IthinkthatIwouldneedthesupportofatechnicalpersontobeabletousethisapp",
+  "Ifoundthevariousfunctionsinthisappwerewellintegrated",
+  "Ithoughttherewastoomuchinconsistencyinthisapp",
+  "Iwouldimaginethatmostpeoplewouldlearntousethisappveryquickly",
+  "Ifoundtheappverycumbersometouse",
+  "Ifeltveryconfidentusingtheapp",
+  "IneededtolearnalotofthingsbeforeIcouldgetgoingwiththisapp",
+  
+  # NPS (recommendation score)
+  "Howlikelyisitthatyouwouldrecommendthisapptoafriendorcolleague"
+)]
+
+# Check dimensions
+cat("Selected variables:", ncol(data_ux), "\n")
+cat("Observations:", nrow(data_ux), "\n")
+```
+
+## Rename Variables
+
+For better readability, we rename variables to shorter, more intuitive names.
+
+```{r rename_variables}
+# Rename variables
+colnames(data_ux) <- c(
+  "app_id",
+  "reviewer",
+  "patients_involved",
+  "clinical_involved",
+  "sus_q1_freq",
+  "sus_q2_complex",
+  "sus_q3_easy",
+  "sus_q4_tech_support",
+  "sus_q5_integrated",
+  "sus_q6_inconsistent",
+  "sus_q7_learn_quick",
+  "sus_q8_cumbersome",
+  "sus_q9_confident",
+  "sus_q10_learn_lot",
+  "nps"
+)
+
+# Check new names
+names(data_ux)
+```
+# SUS Score Calculation
+
+## About the System Usability Scale (SUS)
+
+The SUS is a validated 10-item questionnaire measuring usability on a 0-100 scale. It requires specific scoring procedures:
+
+1. Extract numeric values from text responses (1-5 scale)
+2. Reverse-code negatively worded items (items 2, 4, 6, 8, 10)
+3. Convert to 0-based scale (subtract 1 from each score)
+4. Sum all items and multiply by 2.5 to get final score (0-100)
+
+SUS scores are only calculated for Non-Clinician Reviewers, as they evaluated usability.
+```{r sus_calculation}
+# Define SUS item names
+sus_items <- c(
+  "sus_q1_freq", "sus_q2_complex", "sus_q3_easy", "sus_q4_tech_support", 
+  "sus_q5_integrated", "sus_q6_inconsistent", "sus_q7_learn_quick", 
+  "sus_q8_cumbersome", "sus_q9_confident", "sus_q10_learn_lot"
+)
+
+# Step 1: Extract numeric values and convert to numeric
+# Note: This extracts only the first digit from responses
+data_ux[sus_items] <- lapply(data_ux[sus_items], function(x) {
+  as.numeric(gsub("[^0-9]", "", x))
+})
+
+# Step 2: Identify and remove invalid SUS responses
+# SUS items must be integers between 1-5. Any value outside this range 
+# indicates invalid data (e.g., decimal values like "3.5" which become "35")
+invalid_mask <- apply(data_ux[sus_items], 1, function(row) {
+  any(row > 5 | row < 1, na.rm = TRUE)
+})
+
+if(sum(invalid_mask) > 0) {
+  cat("Rows with invalid SUS values (outside 1-5 range):\n")
+  print(which(invalid_mask))
+  data_ux <- data_ux[!invalid_mask, ]
+  cat("Removed", sum(invalid_mask), "rows with invalid SUS responses\n")
+  cat("New sample size:", nrow(data_ux), "\n\n")
+}
+
+# Step 3: Create backup of original values (before reverse coding)
+sus_backup <- paste0(sus_items, "_orig")
+data_ux[sus_backup] <- data_ux[sus_items]
+
+# Step 4: Reverse-code negatively worded items
+# Formula: 6 - original_value (converts 1→5, 2→4, 3→3, 4→2, 5→1)
+reverse_items <- c("sus_q2_complex", "sus_q4_tech_support", "sus_q6_inconsistent", 
+                   "sus_q8_cumbersome", "sus_q10_learn_lot")
+
+data_ux[reverse_items] <- lapply(data_ux[reverse_items], function(x) {
+  ifelse(is.na(x), NA, 6 - x)
+})
+
+# Step 5: Convert to 0-based scale (1→0, 5→4)
+data_ux[sus_items] <- lapply(data_ux[sus_items], function(x) {
+  ifelse(is.na(x), NA, x - 1)
+})
+
+# Step 6: Calculate total SUS score (sum * 2.5 = 0-100 scale)
+data_ux$sus_total <- rowSums(data_ux[sus_items], na.rm = TRUE) * 2.5
+
+# Step 7: Set SUS to NA for clinician_reviewers (they didn't complete SUS)
+data_ux$sus_total[data_ux$reviewer == "clinician_reviewer"] <- NA
+
+# Check for missing values
+na_counts <- sapply(data_ux[sus_items], function(x) sum(is.na(x)))
+cat("Missing values per SUS item:\n")
+print(na_counts)
+```
+
+## SUS Distribution and Outlier Detection
+```{r sus_distribution}
+# Summary statistics
+summary(data_ux$sus_total)
+
+# Histogram
+hist(data_ux$sus_total, 
+     main = "Distribution of SUS Scores", 
+     xlab = "SUS Total (0-100)", 
+     col = "skyblue",
+     breaks = 20)
+
+# Check for outliers (scores > 100 indicate calculation error)
+outlier_rows <- which(data_ux$sus_total > 100)
+if(length(outlier_rows) > 0) {
+  cat("\nOutliers found (SUS > 100):\n")
+  print(data_ux[outlier_rows, c("app_id", "sus_total")])
+  
+  # Remove outliers
+  data_ux <- data_ux[-outlier_rows, ]
+  cat("\nOutliers removed. New sample size:", nrow(data_ux), "\n")
+}
+```
+
+# NPS Score Calculation
+
+## About the Net Promoter Score (NPS)
+
+The NPS measures recommendation likelihood on a 0-10 scale. Respondents are categorized into:
+
+- **Promoters (9-10)**: Highly satisfied, would actively recommend
+- **Passives (7-8)**: Satisfied but not enthusiastic (excluded from NPS calculation)
+- **Detractors (0-6)**: Unsatisfied, would not recommend
+
+The NPS industry benchmark is calculated as: **% Promoters - % Detractors** (range: -100 to +100)
+
+NPS scores were only collected from Clinician Reviewers.
+```{r nps_preparation}
+# Convert NPS to numeric (extract numbers from text)
+data_ux$nps <- as.numeric(gsub("[^0-9]", "", data_ux$nps))
+
+# Check for outliers (valid range: 0-10)
+outlier_nps <- data_ux %>% 
+  filter(!is.na(nps) & (nps < 0 | nps > 10))
+
+if(nrow(outlier_nps) > 0) {
+  cat("NPS outliers found (outside 0-10 range):\n")
+  print(outlier_nps[, c("app_id", "reviewer", "nps")])
+  
+  # Set outliers to NA
+  data_ux$nps <- ifelse(data_ux$nps < 0 | data_ux$nps > 10, NA, data_ux$nps)
+  cat("\nOutliers set to NA\n")
+}
+
+# Summary statistics
+cat("\nNPS Summary:\n")
+summary(data_ux$nps)
+```
+
+## NPS Categorization
+```{r nps_categorization}
+# Create NPS categories
+data_ux <- data_ux %>%
+  mutate(
+    nps_category = case_when(
+      nps >= 9 & nps <= 10 ~ "Promoter",
+      nps >= 7 & nps <= 8  ~ "Passive",
+      nps >= 0 & nps <= 6  ~ "Detractor",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Check category distribution
+cat("NPS Category Distribution:\n")
+table(data_ux$nps_category, useNA = "always")
+```
+# Analysis 1: Patient Involvement and Usability
+
+## Research Question
+
+Do apps developed with patient involvement have better usability scores?
+
+We compare SUS scores between apps with and without patient involvement during development, using only Non-Clinician Reviewer data.
+```{r rq1_descriptives}
+# Descriptive statistics by patient involvement
+patient_involvement_stats <- data_ux %>% 
+  filter(reviewer == "nonclinician_reviewer") %>%
+  group_by(patients_involved) %>% 
+  summarise(
+    n = n(),
+    mean_sus = round(mean(sus_total, na.rm = TRUE), 1),
+    sd_sus = round(sd(sus_total, na.rm = TRUE), 1),
+    median_sus = round(median(sus_total, na.rm = TRUE), 1)
+  )
+
+print(patient_involvement_stats)
+```
+
+## Statistical Test
+```{r rq1_ttest}
+# Independent samples t-test
+t_test_patients <- t.test(sus_total ~ patients_involved, 
+                          data = data_ux %>% filter(reviewer == "nonclinician_reviewer"),
+                          na.action = na.omit)
+
+print(t_test_patients)
+```
+
+**Result**: t = `r round(t_test_patients$statistic, 2)`, df = `r round(t_test_patients$parameter, 2)`, p = `r round(t_test_patients$p.value, 3)`
+
+The result is **not statistically significant** (p > 0.05).
+
+## Effect Size
+```{r rq1_effect_size}
+# Cohen's d
+cohens_d(sus_total ~ patients_involved, 
+         data = data_ux %>% filter(reviewer == "nonclinician_reviewer"))
+```
+
+## Visualization
+```{r rq1_plot}
+boxplot(sus_total ~ patients_involved, 
+        data = data_ux %>% filter(reviewer == "nonclinician_reviewer"),
+        main = "SUS Scores: Apps with vs. without Patient Involvement",
+        ylab = "SUS Score (0-100)", 
+        xlab = "Patient Involvement",
+        col = c("lightcoral", "lightblue"))
+```
+
+## Interpretation
+
+With only n = 13 apps having documented patient involvement, the sample size is too small to draw reliable conclusions. While no significant difference was found, this null result should be interpreted with caution due to low statistical power.
+
+
+
+# Analysis 2: Clinical Expert Involvement and Clinical Recommendation
+
+## Research Question
+
+Do apps developed with clinical expert involvement receive better ratings from clinician reviewers?
+
+We compare NPS scores between apps with and without clinical expert involvement during development, using only Clinician Reviewer data.
+```{r rq2_descriptives}
+# Filter: Only clinician reviewers with valid NPS
+data_nps <- data_ux %>% 
+  filter(reviewer == "clinician_reviewer") %>%
+  filter(!is.na(nps))
+
+# Descriptive statistics by clinical involvement
+clinical_involvement_stats <- data_nps %>% 
+  group_by(clinical_involved) %>% 
+  summarise(
+    n = n(),
+    min_nps = min(nps, na.rm = TRUE),
+    max_nps = max(nps, na.rm = TRUE),
+    mean_nps = round(mean(nps, na.rm = TRUE), 2),
+    sd_nps = round(sd(nps, na.rm = TRUE), 2),
+    median_nps = round(median(nps, na.rm = TRUE), 2)
+  )
+
+print(clinical_involvement_stats)
+```
+
+## Statistical Test
+```{r rq2_ttest}
+# Independent samples t-test
+t_test_clinical <- t.test(nps ~ clinical_involved, data = data_nps)
+
+print(t_test_clinical)
+```
+
+**Result**: t = `r round(t_test_clinical$statistic, 2)`, df = `r round(t_test_clinical$parameter, 2)`, p = `r round(t_test_clinical$p.value, 3)`
+
+## Effect Size
+```{r rq2_effect_size}
+# Cohen's d
+cohens_d(nps ~ clinical_involved, data = data_nps)
+```
+
+Perfect! Mit Boxplot:
+
+
+## Visualization
+
+```{r rq2_plot}
+boxplot(nps ~ clinical_involved, 
+        data = data_nps,
+        main = "NPS Scores: Apps with vs. without Clinical Expert Involvement",
+        ylab = "NPS Score (0-10)", 
+        xlab = "Clinical Expert Involvement",
+        col = c("lightcoral", "lightblue"))
+```
+
+
+
+
+## NPS Industry Benchmark Calculation
+
+To properly interpret NPS, we calculate the industry-standard metric: **% Promoters - % Detractors**
+
+
+## Distribution of NPS Categories
+
+While the traditional NPS aggregates multiple ratings for a single product, here we examine the distribution of ratings across multiple apps to understand overall recommendation patterns.
+
+```{r nps_distribution}
+
+# Distribution of NPS categories by clinical involvement
+nps_distribution <- data_nps %>%
+  group_by(clinical_involved) %>%
+  summarise(
+    n_total = n(),
+    n_promoters = sum(nps_category == "Promoter", na.rm = TRUE),
+    n_passives = sum(nps_category == "Passive", na.rm = TRUE),
+    n_detractors = sum(nps_category == "Detractor", na.rm = TRUE),
+    pct_promoters = round((n_promoters / n_total) * 100, 1),
+    pct_passives = round((n_passives / n_total) * 100, 1),
+    pct_detractors = round((n_detractors / n_total) * 100, 1)
+  )
+
+print(nps_distribution)
+```
+
+**Interpretation**: The majority of apps are rated as Detractors by clinicians, with only `r nps_distribution$pct_promoters[1]`% Promoters for apps with clinical involvement and `r nps_distribution$pct_promoters[2]`% for apps without. This suggests widespread dissatisfaction with current mHealth apps from a clinical perspective.
+
+However, these unusually low scores may partly reflect a methodological issue: The NPS question asked clinicians "Would you recommend this app to a friend or colleague?" rather than "Would you recommend this app to your patients?" Since clinicians evaluate apps for patient use rather than personal or collegial use, the question framing may have been inappropriate for this reviewer group, potentially contributing to the extremely negative scores.
+
+
+# Analysis 3: Correlation Between Reviewer Groups
+
+## Research Question
+
+Do Non-Clinician Reviewers (usability focus) and Clinician Reviewers (clinical focus) evaluate apps similarly?
+
+We test the correlation between SUS scores (Non-Clinicians) and NPS scores (Clinicians) for the same apps.
+
+## Data Preparation
+
+```{r rq3_data_prep}
+# Extract ratings from each reviewer group
+nonclinician_ratings <- data_ux %>%
+  filter(reviewer == "nonclinician_reviewer") %>%
+  select(app_id, sus_total)
+
+clinician_ratings <- data_ux %>%
+  filter(reviewer == "clinician_reviewer") %>%
+  select(app_id, nps)
+
+# Merge by app_id (each app rated by both groups)
+combined_ratings <- nonclinician_ratings %>%
+  inner_join(clinician_ratings, by = "app_id") %>%
+  drop_na(sus_total, nps)
+
+cat("Apps with both SUS and NPS ratings:", nrow(combined_ratings), "\n")
+```
+
+
+
+## Correlation Test
+
+```{r rq3_correlation}
+# Pearson correlation
+cor_test <- cor.test(combined_ratings$sus_total, combined_ratings$nps)
+
+print(cor_test)
+```
+
+**Result**: r = `r round(cor_test$estimate, 3)`, p = `r round(cor_test$p.value, 3)`
+
+The correlation is **very weak and not statistically significant**, indicating that the two reviewer groups evaluate apps based on different criteria.
+
+## Visualization
+
+
+```{r rq3_plot}
+plot(combined_ratings$sus_total, combined_ratings$nps,
+     xlab = "SUS Score (Non-Clinician Reviewers)", 
+     ylab = "NPS Score (Clinician Reviewers)",
+     main = "Relationship Between Usability and Clinical Ratings",
+     pch = 19, col = "steelblue")
+abline(lm(nps ~ sus_total, data = combined_ratings), col = "red", lwd = 2)
+```
+
+
+# Validity and Reliability
+
+## SUS Internal Consistency
+
+To verify that the SUS scale reliably measures usability in this dataset, we calculate Cronbach's Alpha for internal consistency.
+
+```{r sus_reliability}
+
+# Extract SUS items for Non-Clinician Reviewers only
+sus_items_only <- data_ux %>%
+  filter(reviewer == "nonclinician_reviewer") %>%
+  select(sus_q1_freq, sus_q2_complex, sus_q3_easy, sus_q4_tech_support,
+         sus_q5_integrated, sus_q6_inconsistent, sus_q7_learn_quick,
+         sus_q8_cumbersome, sus_q9_confident, sus_q10_learn_lot)
+
+# Calculate Cronbach's Alpha
+alpha_result <- alpha(sus_items_only)
+print(alpha_result$total)
+```
+
+**Result**: Cronbach's α = `r round(alpha_result$total$raw_alpha, 2)`
+
+This indicates **good internal consistency**, suggesting the SUS items reliably measure a single construct (usability) in this sample.
+
+# Discussion
+
+## Summary of Key Findings
+
+This analysis examined mHealth app evaluations from two perspectives: usability (Non-Clinician Reviewers using SUS) and clinical suitability (Clinician Reviewers using NPS). Three main findings emerged:
+
+1. **Patient Involvement**: No significant relationship was found between patient involvement during app development and usability scores (p = `r round(t_test_patients$p.value, 3)`). However, with only n = 13 apps documenting patient involvement, this finding should be interpreted with extreme caution due to insufficient statistical power.
+
+2. **Clinical Expert Involvement**: Apps developed with clinical expert involvement received significantly higher NPS scores from clinician reviewers (Cohen's d = 0.55, p < 0.05), representing a medium effect size. However, both groups showed extremely negative NPS scores (with clinical involvement: M = 6.37; without: M = 4.88), with the majority of apps classified as Detractors.
+
+3. **Lack of Correlation Between Reviewer Groups**: No significant correlation was found between SUS scores (Non-Clinicians) and NPS scores (Clinicians): r = `r round(cor_test$estimate, 3)`, p = `r round(cor_test$p.value, 3)`. This suggests that usability and clinical suitability are evaluated based on fundamentally different criteria.
+
+## Interpreting the Lack of Correlation
+
+The absence of correlation between Non-Clinician and Clinician ratings is a critical finding that requires careful interpretation. Two primary explanations warrant consideration:
+
+### Explanation 1: Methodological Limitation of NPS Question (Most Likely)
+
+The NPS question asked clinicians: **"Would you recommend this app to a friend or colleague?"** This framing is problematic for several reasons:
+
+- Clinicians evaluate health apps for **patient use**, not for friends or colleagues
+- The question measures personal recommendation rather than clinical prescription appropriateness
+- The extremely low NPS scores suggesting the question may have been misinterpreted or felt inappropriate to clinician reviewers
+
+The SUS demonstrated good internal consistency (Cronbach's α = `r round(alpha_result$total$raw_alpha, 2)`), confirming it reliably measured usability. In contrast, the NPS validity is questionable in this context. A more appropriate formulation would have been: **"Would you recommend this app to your patients?"** or **"Would you prescribe this app in your clinical practice?"**
+
+This methodological flaw likely explains the lack of correlation and the extremely negative NPS scores. The NPS may not validly capture clinicians' actual assessment of app quality for patient care.
+
+### Explanation 2: Usability ≠ Clinical Utility (Alternative Interpretation)
+
+If we assume the NPS scores are valid despite the question framing, the lack of correlation would suggest that **usability and clinical utility are independent dimensions**:
+
+- **Non-Clinicians** prioritize: ease of use, intuitive design, user experience
+- **Clinicians** prioritize: evidence base, therapeutic validity, safety, integration into care pathways
+
+Under this interpretation, an app could be technically well-designed and easy to use (high SUS) while lacking clinical value (low NPS) due to:
+- Insufficient evidence base
+- Superficial or gamified approaches without therapeutic depth
+- Privacy or safety concerns
+- Poor integration with clinical workflows
+
+Both dimensions would be essential for comprehensive app evaluation, but they would measure distinct aspects of quality.
+
+## Limitations
+
+Several limitations should be acknowledged:
+
+1. **Small sample for Patient Involvement**: Only 13 apps documented patient involvement, providing insufficient power to detect meaningful effects.
+
+2. **Unclear vs. absent patient involvement**: Apps without documented patient involvement were coded as "No" regardless of whether involvement was confirmed absent or simply unknown/unreported. This conflates truly uninvolved development with undocumented processes, potentially masking real differences. The "No patient involvement" group may include apps that did involve patients but did not publicly document this process.
+
+3. **Single ratings per app**: Each app was rated by one Non-Clinician and one Clinician reviewer, limiting reliability assessment at the app level.
+
+4. **NPS question validity**: As discussed, the NPS question framing was not appropriate for clinical reviewers evaluating patient-facing health apps.
+
+5. **Invalid SUS responses**: Two cases contained decimal values (e.g., "3.5") which are not valid SUS responses and were removed from analysis.
+
+## Implications
+
+Regardless of which explanation better accounts for the findings, several implications emerge:
+
+1. **Multi-stakeholder evaluation is essential**: Both usability (patient/user perspective) and clinical appropriateness (clinician perspective) must be evaluated, as they appear to measure distinct aspects of app quality.
+
+2. **Instrument validity matters**: Evaluation tools must be carefully adapted to the specific reviewer group and context. The standard NPS question is not appropriate for clinicians evaluating patient-facing health apps.
+
+3. **Clinical involvement shows promise**: Despite methodological concerns with the NPS, the medium effect size (d = 0.55) for clinical expert involvement suggests this may be a meaningful quality indicator worth investigating with better measurement instruments.
+
+4. **Future research needs**: Larger samples of apps with documented patient involvement, multiple raters per app, and appropriately formulated questions for clinical reviewers would strengthen future evaluations.
+
+## Conclusion
+
+This analysis reveals the complexity of evaluating mHealth apps. The lack of correlation between usability and clinical ratings—whether due to methodological limitations or genuine independence of these quality dimensions—underscores the need for comprehensive, multi-perspective evaluation frameworks with carefully validated instruments tailored to each stakeholder group.
